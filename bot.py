@@ -10,13 +10,19 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
+PORT = int(os.getenv("PORT", "10000"))
+WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", "telegram-webhook")
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN environment variable is not set.")
 
+if not RENDER_EXTERNAL_URL:
+    raise RuntimeError("RENDER_EXTERNAL_URL is not available. Deploy this app as a Render Web Service.")
+
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = (
+    await update.message.reply_text(
         "🇳🇬 Welcome to Nigeria Job Finder!\n\n"
         "I help you find current Nigerian and remote job opportunities.\n\n"
         "Use:\n"
@@ -26,7 +32,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🔔 /alerts - Job alerts\n"
         "ℹ️ /help - Help"
     )
-    await update.message.reply_text(message)
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -50,15 +55,17 @@ async def remote(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def nigeria(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🇳🇬 Nigerian job search is coming next."
-    )
+    await update.message.reply_text("🇳🇬 Nigerian job search is coming next.")
 
 
 async def alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🔔 Job alerts are coming next. You'll be able to choose job categories and receive new matching opportunities."
     )
+
+
+async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("✅ Nigeria Job Finder is online.")
 
 
 def main():
@@ -70,9 +77,19 @@ def main():
     application.add_handler(CommandHandler("remote", remote))
     application.add_handler(CommandHandler("nigeria", nigeria))
     application.add_handler(CommandHandler("alerts", alerts))
+    application.add_handler(CommandHandler("status", status))
 
-    logger.info("Nigeria Job Finder bot is running...")
-    application.run_polling()
+    webhook_url = f"{RENDER_EXTERNAL_URL.rstrip('/')}/{WEBHOOK_PATH}"
+    logger.info("Starting Nigeria Job Finder webhook: %s", webhook_url)
+
+    application.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        url_path=WEBHOOK_PATH,
+        webhook_url=webhook_url,
+        drop_pending_updates=True,
+        allowed_updates=Update.ALL_TYPES,
+    )
 
 
 if __name__ == "__main__":
