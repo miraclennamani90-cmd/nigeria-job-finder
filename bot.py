@@ -2,7 +2,6 @@ import os
 import json
 import logging
 import urllib.request
-import urllib.parse
 import psycopg
 
 from telegram import Update
@@ -12,9 +11,9 @@ from telegram.ext import (
     ContextTypes,
 )
 
-# --------------------------------------------------
+# ============================================================
 # CONFIGURATION
-# --------------------------------------------------
+# ============================================================
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 DATABASE_URL = os.environ.get("DATABASE_URL")
@@ -24,9 +23,9 @@ PORT = int(os.environ.get("PORT", "10000"))
 WEBHOOK_PATH = os.environ.get("WEBHOOK_PATH", "telegram")
 
 
-# --------------------------------------------------
+# ============================================================
 # LOGGING
-# --------------------------------------------------
+# ============================================================
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -36,9 +35,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-# --------------------------------------------------
+# ============================================================
 # DATABASE
-# --------------------------------------------------
+# ============================================================
 
 def init_database():
     """Create the jobs table if it does not already exist."""
@@ -98,61 +97,362 @@ def init_database():
         logger.exception("Database initialization failed.")
 
 
-# --------------------------------------------------
-# REMOTIVE API
-# --------------------------------------------------
+# ============================================================
+# SAVE JOB TO DATABASE
+# ============================================================
+
+def save_job(
+    source,
+    external_id,
+    title,
+    company,
+    location,
+    country,
+    remote,
+    employment_type,
+    experience_level,
+    description,
+    application_url,
+    published_at,
+    raw_job,
+):
+    """
+    Save a job to PostgreSQL.
+
+    If the same source + external ID already exists,
+    update the existing job instead of creating a duplicate.
+    """
+
+    if not DATABASE_URL:
+        return False
+
+    try:
+        with psycopg.connect(DATABASE_URL) as conn:
+            with conn.cursor() as cur:
+
+                # Check whether this job already exists
+                cur.execute(
+                    """
+                    SELECT id
+                    FROM jobs
+                    WHERE source = %s
+                    AND external_id = %s
+                    LIMIT 1
+                    """,
+                    (source, external_id),
+                )
+
+                existing = cur.fetchone()
+
+                if existing:
+
+                    cur.execute(
+                        """
+                        UPDATE jobs
+                        SET
+                            title = %s,
+                            company = %s,
+                            location = %s,
+                            country = %s,
+                            remote = %s,
+                            employment_type = %s,
+                            experience_level = %s,
+                            description = %s,
+                            application_url = %s,
+                            published_at = %s,
+                            last_seen_at = CURRENT_TIMESTAMP,
+                            is_active = TRUE,
+                            raw_json = %s,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE id = %s
+                        """,
+                        (
+                            title,
+                            company,
+                            location,
+                            country,
+                            remote,
+                            employment_type,
+                            experience_level,
+                            description,
+                            application_url,
+                            published_at,
+                            json.dumps(raw_job),
+                            existing[0],
+                        ),
+                    )
+
+                    conn.commit()
+
+                    return False
+
+                # New job
+                cur.execute(
+                    """
+                    INSERT INTO jobs (
+                        source,
+                        external_id,
+                        title,
+                        company,
+                        location,
+                        country,
+                        remote,
+                        employment_type,
+                        experience_level,
+                        description,
+                        application_url,
+                        published_at,
+                        raw_json
+                    )
+                    VALUES (
+                        %s, %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s, %s
+                    )
+                    """,
+                    (
+                        source,
+                        external_id,
+                        title,
+                        company,
+                        location,
+                        country,
+                        remote,
+                        employment_type,
+                        experience_level,
+                        description,
+                        application_url,
+                        published_at,
+                        json.dumps(raw_job),
+                    ),
+                )
+
+            conn.commit()
+
+        return True
+
+    except Exception:
+        logger.exception("Failed to save job.")
+        return False
+
+
+# ============================================================
+# REMOTIVE
+# ============================================================
 
 def get_remotive_jobs(limit=10):
-    """Get remote jobs from Remotive."""
 
     url = "https://remotive.com/api/remote-jobs"
 
     try:
+
         with urllib.request.urlopen(url, timeout=20) as response:
-            data = json.loads(response.read().decode("utf-8"))
+            data = json.loads(
+                response.read().decode("utf-8")
+            )
 
         jobs = data.get("jobs", [])
 
         return jobs[:limit]
 
     except Exception:
-        logger.exception("Failed to get jobs from Remotive.")
+
+        logger.exception(
+            "Failed to get jobs from Remotive."
+        )
+
         return []
 
 
-# --------------------------------------------------
-# JOBICY API
-# --------------------------------------------------
+# ============================================================
+# JOBICY
+# ============================================================
 
 def get_jobicy_jobs(limit=10):
-    """Get remote jobs from Jobicy."""
 
-    url = "https://jobicy.com/api/v2/remote-jobs?count=10"
+    url = (
+        "https://jobicy.com/api/v2/"
+        "remote-jobs?count=10"
+    )
 
     try:
+
         with urllib.request.urlopen(url, timeout=20) as response:
-            data = json.loads(response.read().decode("utf-8"))
+            data = json.loads(
+                response.read().decode("utf-8")
+            )
 
         jobs = data.get("jobs", [])
 
         return jobs[:limit]
 
     except Exception:
-        logger.exception("Failed to get jobs from Jobicy.")
+
+        logger.exception(
+            "Failed to get jobs from Jobicy."
+        )
+
         return []
 
 
-# --------------------------------------------------
+# ============================================================
+# REMOTIVE → DATABASE
+# ============================================================
+
+def process_remotive_job(job):
+
+    external_id = str(
+        job.get("id")
+        or job.get("url")
+        or ""
+    )
+
+    title = job.get(
+        "title",
+        "Untitled position"
+    )
+
+    company = job.get(
+        "company_name",
+        "Unknown company"
+    )
+
+    location = job.get(
+        "candidate_required_location",
+        "Remote"
+    )
+
+    description = job.get(
+        "description",
+        ""
+    )
+
+    application_url = job.get(
+        "url",
+        ""
+    )
+
+    published_at = job.get(
+        "publication_date",
+        ""
+    )
+
+    employment_type = job.get(
+        "job_type",
+        ""
+    )
+
+    is_new = save_job(
+        source="Remotive",
+        external_id=external_id,
+        title=title,
+        company=company,
+        location=location,
+        country="",
+        remote=True,
+        employment_type=employment_type,
+        experience_level="",
+        description=description,
+        application_url=application_url,
+        published_at=published_at,
+        raw_job=job,
+    )
+
+    return is_new
+
+
+# ============================================================
+# JOBICY → DATABASE
+# ============================================================
+
+def process_jobicy_job(job):
+
+    external_id = str(
+        job.get("id")
+        or job.get("url")
+        or ""
+    )
+
+    title = job.get(
+        "jobTitle",
+        "Untitled position"
+    )
+
+    company = job.get(
+        "companyName",
+        "Unknown company"
+    )
+
+    location = job.get(
+        "jobGeo",
+        "Remote"
+    )
+
+    description = job.get(
+        "jobDescription",
+        ""
+    )
+
+    application_url = job.get(
+        "url",
+        ""
+    )
+
+    published_at = job.get(
+        "pubDate",
+        ""
+    )
+
+    employment_type = job.get(
+        "jobType",
+        ""
+    )
+
+    is_new = save_job(
+        source="Jobicy",
+        external_id=external_id,
+        title=title,
+        company=company,
+        location=location,
+        country="",
+        remote=True,
+        employment_type=employment_type,
+        experience_level="",
+        description=description,
+        application_url=application_url,
+        published_at=published_at,
+        raw_job=job,
+    )
+
+    return is_new
+
+
+# ============================================================
 # FORMAT REMOTIVE JOB
-# --------------------------------------------------
+# ============================================================
 
 def format_remotive_job(job):
-    title = job.get("title", "Untitled position")
-    company = job.get("company_name", "Unknown company")
-    location = job.get("candidate_required_location", "Remote")
+
+    title = job.get(
+        "title",
+        "Untitled position"
+    )
+
+    company = job.get(
+        "company_name",
+        "Unknown company"
+    )
+
+    location = job.get(
+        "candidate_required_location",
+        "Remote"
+    )
+
     url = job.get("url", "")
 
-    salary = job.get("salary", "")
+    salary = job.get(
+        "salary",
+        ""
+    )
 
     message = (
         f"💼 <b>{title}</b>\n"
@@ -164,24 +464,43 @@ def format_remotive_job(job):
         message += f"💰 {salary}\n"
 
     message += (
-        f"🌐 Source: Remotive\n"
+        "🌐 Source: Remotive\n"
         f"🔗 <a href=\"{url}\">Apply / View Job</a>"
     )
 
     return message
 
 
-# --------------------------------------------------
+# ============================================================
 # FORMAT JOBICY JOB
-# --------------------------------------------------
+# ============================================================
 
 def format_jobicy_job(job):
-    title = job.get("jobTitle", "Untitled position")
-    company = job.get("companyName", "Unknown company")
-    location = job.get("jobGeo", "Remote")
-    url = job.get("url", "")
 
-    salary = job.get("annualSalary", "")
+    title = job.get(
+        "jobTitle",
+        "Untitled position"
+    )
+
+    company = job.get(
+        "companyName",
+        "Unknown company"
+    )
+
+    location = job.get(
+        "jobGeo",
+        "Remote"
+    )
+
+    url = job.get(
+        "url",
+        ""
+    )
+
+    salary = job.get(
+        "annualSalary",
+        ""
+    )
 
     message = (
         f"💼 <b>{title}</b>\n"
@@ -193,23 +512,27 @@ def format_jobicy_job(job):
         message += f"💰 {salary}\n"
 
     message += (
-        f"🌐 Source: Jobicy\n"
+        "🌐 Source: Jobicy\n"
         f"🔗 <a href=\"{url}\">Apply / View Job</a>"
     )
 
     return message
 
 
-# --------------------------------------------------
+# ============================================================
 # /START
-# --------------------------------------------------
+# ============================================================
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     message = (
         "🇳🇬 <b>Welcome to Nigeria Job Finder!</b>\n\n"
-        "I help you find current job opportunities for Nigerians "
-        "and remote jobs.\n\n"
+
+        "I help you find current job opportunities "
+        "for Nigerians and remote jobs.\n\n"
 
         "Available commands:\n"
         "🔎 /jobs - Find current jobs\n"
@@ -226,11 +549,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# --------------------------------------------------
+# ============================================================
 # /HELP
-# --------------------------------------------------
+# ============================================================
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def help_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     message = (
         "🇳🇬 <b>Nigeria Job Finder Help</b>\n\n"
@@ -241,8 +567,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/alerts - Manage job alerts\n"
         "/status - Check bot status\n\n"
 
-        "More job sources, verification, duplicate detection "
-        "and personalized alerts will be added as we build the system."
+        "The job database now tracks jobs so we can "
+        "detect duplicates and monitor job freshness."
     )
 
     await update.message.reply_text(
@@ -251,31 +577,60 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# --------------------------------------------------
+# ============================================================
 # /JOBS
-# --------------------------------------------------
+# ============================================================
 
-async def jobs(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def jobs(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     await update.message.reply_text(
         "🔎 Searching current jobs..."
     )
 
-    remotive_jobs = get_remotive_jobs(limit=5)
-    jobicy_jobs = get_jobicy_jobs(limit=5)
+    remotive_jobs = get_remotive_jobs(
+        limit=5
+    )
 
-    total_jobs = len(remotive_jobs) + len(jobicy_jobs)
+    jobicy_jobs = get_jobicy_jobs(
+        limit=5
+    )
+
+    new_jobs = 0
+    total_jobs = (
+        len(remotive_jobs)
+        + len(jobicy_jobs)
+    )
+
+    # Save Remotive jobs
+    for job in remotive_jobs:
+
+        if process_remotive_job(job):
+            new_jobs += 1
+
+    # Save Jobicy jobs
+    for job in jobicy_jobs:
+
+        if process_jobicy_job(job):
+            new_jobs += 1
 
     if total_jobs == 0:
+
         await update.message.reply_text(
-            "Sorry, I couldn't find jobs right now. Please try again later."
+            "Sorry, I couldn't find jobs right now. "
+            "Please try again later."
         )
+
         return
 
     await update.message.reply_text(
-        f"✅ Found {total_jobs} jobs."
+        f"✅ Found {total_jobs} jobs.\n"
+        f"🆕 {new_jobs} new jobs added to the database."
     )
 
+    # Display Remotive
     for job in remotive_jobs:
 
         message = format_remotive_job(job)
@@ -286,6 +641,7 @@ async def jobs(update: Update, context: ContextTypes.DEFAULT_TYPE):
             disable_web_page_preview=True
         )
 
+    # Display Jobicy
     for job in jobicy_jobs:
 
         message = format_jobicy_job(job)
@@ -297,35 +653,46 @@ async def jobs(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
-# --------------------------------------------------
+# ============================================================
 # /REMOTE
-# --------------------------------------------------
+# ============================================================
 
-async def remote(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def remote(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     await jobs(update, context)
 
 
-# --------------------------------------------------
+# ============================================================
 # /NIGERIA
-# --------------------------------------------------
+# ============================================================
 
-async def nigeria(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def nigeria(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     await update.message.reply_text(
         "🇳🇬 Nigerian job sources are being connected next.\n\n"
-        "The database and job verification system are now being built."
+        "The database and remote-job collection system "
+        "are now working."
     )
 
 
-# --------------------------------------------------
+# ============================================================
 # /ALERTS
-# --------------------------------------------------
+# ============================================================
 
-async def alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def alerts(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     await update.message.reply_text(
         "🔔 Job alerts are coming soon.\n\n"
+
         "You will eventually be able to choose:\n"
         "• Job category\n"
         "• Location\n"
@@ -336,25 +703,38 @@ async def alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# --------------------------------------------------
+# ============================================================
 # /STATUS
-# --------------------------------------------------
+# ============================================================
 
-async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def status(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     database_status = "❌ Not connected"
 
     if DATABASE_URL:
 
         try:
-            with psycopg.connect(DATABASE_URL) as conn:
+
+            with psycopg.connect(
+                DATABASE_URL
+            ) as conn:
+
                 with conn.cursor() as cur:
-                    cur.execute("SELECT 1")
+
+                    cur.execute(
+                        "SELECT 1"
+                    )
 
             database_status = "✅ Connected"
 
         except Exception:
-            database_status = "❌ Connection failed"
+
+            database_status = (
+                "❌ Connection failed"
+            )
 
     message = (
         "🇳🇬 <b>Nigeria Job Finder Status</b>\n\n"
@@ -368,23 +748,31 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# --------------------------------------------------
+# ============================================================
 # MAIN
-# --------------------------------------------------
+# ============================================================
 
 def main():
 
     if not BOT_TOKEN:
-        raise RuntimeError("BOT_TOKEN is not set.")
+        raise RuntimeError(
+            "BOT_TOKEN is not set."
+        )
 
     if not RENDER_EXTERNAL_URL:
-        raise RuntimeError("RENDER_EXTERNAL_URL is not set.")
+        raise RuntimeError(
+            "RENDER_EXTERNAL_URL is not set."
+        )
 
-    # Initialize PostgreSQL database
+    # Initialize database
     init_database()
 
     # Create Telegram application
-    application = Application.builder().token(BOT_TOKEN).build()
+    application = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .build()
+    )
 
     # Commands
     application.add_handler(
@@ -415,7 +803,7 @@ def main():
         CommandHandler("status", status)
     )
 
-    # Webhook
+    # Webhook URL
     webhook_url = (
         RENDER_EXTERNAL_URL.rstrip("/")
         + "/"
@@ -427,6 +815,7 @@ def main():
         webhook_url
     )
 
+    # Start webhook
     application.run_webhook(
         listen="0.0.0.0",
         port=PORT,
@@ -436,9 +825,9 @@ def main():
     )
 
 
-# --------------------------------------------------
+# ============================================================
 # RUN
-# --------------------------------------------------
+# ============================================================
 
 if __name__ == "__main__":
     main()
